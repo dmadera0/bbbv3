@@ -1,12 +1,21 @@
 # MLB Game Outcome Prediction Model and Application - PART 1: Setup & Scraper Base
-# ===============================================================================
-# Step-by-step walkthrough: In this first part, we'll set up the base project structure,
-# install necessary libraries, and begin building the scraping functions to extract data
-# from Yahoo Sports.
+# ===============================================================================" +
+"# Step-by-step walkthrough: In this part, we will:
+" +
+"# 1. Silence urllib3 SSL warnings
+" +
+"# 2. Scrape team batting stats (already working)
+" +
+"# 3. Scrape team pitching stats
+" +
+"# 4. Add a simple pandas viewer to inspect stored stats
 
 # ----------------------------
 # STEP 1: Import Dependencies
 # ----------------------------
+import warnings  # to silence SSL warning
+warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
+
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -17,20 +26,53 @@ import time
 # ----------------------------
 # STEP 2: Setup SQLite Database
 # ----------------------------
-# We'll use a local SQLite database for simplicity. You can scale this later to PostgreSQL/MySQL.
 conn = sqlite3.connect("mlb_predictions.db")
 cursor = conn.cursor()
 
-# Create tables if they don't exist already
+# Drop old team_pitching_stats if testing (optional for dev use)
+cursor.execute("DROP TABLE IF EXISTS team_pitching_stats")
+
+# Create wide-format tables for team stats
 def create_tables():
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS team_stats (
+        CREATE TABLE IF NOT EXISTS team_batting_stats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             team_name TEXT,
             date TEXT,
-            stat_type TEXT,
-            stat_name TEXT,
-            stat_value REAL
+            AVG REAL,
+            OBP REAL,
+            SLG REAL,
+            OPS REAL,
+            AB INTEGER,
+            R INTEGER,
+            H INTEGER,
+            "2B" INTEGER,
+            "3B" INTEGER,
+            HR INTEGER,
+            RBI INTEGER,
+            BB INTEGER,
+            K INTEGER,
+            SO INTEGER,
+            SB INTEGER,
+            CS INTEGER,
+            AVG_RANK INTEGER,
+            OBP_RANK INTEGER,
+            SLG_RANK INTEGER,
+            OPS_RANK INTEGER
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS team_pitching_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_name TEXT,
+            date TEXT,
+            ERA REAL,
+            H INTEGER,
+            BB INTEGER,
+            K INTEGER,
+            SV INTEGER,
+            WHIP REAL
         )
     ''')
 
@@ -65,49 +107,115 @@ def create_tables():
 create_tables()
 
 # ---------------------------------------------
-# STEP 3: Define Scraper for Yahoo Team Batting
+# STEP 3a: Scraper for Yahoo Team Batting Stats
 # ---------------------------------------------
 def scrape_team_batting_stats():
     url = "https://sports.yahoo.com/mlb/stats/team/"
     response = requests.get(url)
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # Find the stats table
     table = soup.find("table")
     headers = [th.text.strip() for th in table.find_all("th")]
-
-    # Iterate through each row of team data
     rows = table.find("tbody").find_all("tr")
     today = datetime.date.today().isoformat()
 
     for row in rows:
         cells = row.find_all("td")
-        team_name = cells[1].text.strip()  # Usually the 2nd column has team name
+        team_data = {
+            'team_name': cells[1].text.strip(),
+            'date': today
+        }
 
         for i in range(2, len(cells)):
             stat_name = headers[i]
-            stat_value = cells[i].text.strip().replace("%", "")
-            try:
-                stat_value = float(stat_value)
-            except:
-                stat_value = None
+            clean_name = stat_name.replace(" ", "_").replace("%", "").replace("-", "_")
+            if clean_name in ["2B", "3B"]:
+                clean_name = f'"{clean_name}"'
 
-            cursor.execute("""
-                INSERT INTO team_stats (team_name, date, stat_type, stat_name, stat_value)
-                VALUES (?, ?, ?, ?, ?)
-            """, (team_name, today, "batting", stat_name, stat_value))
+            try:
+                team_data[clean_name] = float(cells[i].text.strip().replace("%", "").replace(",", ""))
+            except:
+                team_data[clean_name] = None
+
+        expected_columns = [
+            'AVG', 'OBP', 'SLG', 'OPS', 'AB', 'R', 'H', '"2B"', '"3B"', 'HR',
+            'RBI', 'BB', 'K', 'SO', 'SB', 'CS',
+            'AVG_RANK', 'OBP_RANK', 'SLG_RANK', 'OPS_RANK'
+        ]
+        for col in expected_columns:
+            if col not in team_data:
+                team_data[col] = None
+
+        columns = ", ".join(team_data.keys())
+        placeholders = ", ".join(["?" for _ in team_data])
+        values = list(team_data.values())
+
+        cursor.execute(f"""
+            INSERT INTO team_batting_stats ({columns})
+            VALUES ({placeholders})
+        """, values)
 
     conn.commit()
-    print(f"[INFO] Team batting stats scraped and stored for {today}")
+    print(f"[INFO] Team batting stats (wide format) scraped and stored for {today}")
 
-# -------------------------------
-# STEP 4: Run Scraper and Confirm
-# -------------------------------
+# ---------------------------------------------
+# STEP 3b: Scraper for Yahoo Team Pitching Stats
+# ---------------------------------------------
+def scrape_team_pitching_stats():
+    url = "https://sports.yahoo.com/mlb/stats/team/?selectedTable=1"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    table = soup.find("table")
+    headers = [th.text.strip() for th in table.find_all("th")]
+    rows = table.find("tbody").find_all("tr")
+    today = datetime.date.today().isoformat()
+
+    for row in rows:
+        cells = row.find_all("td")
+        team_data = {
+            'team_name': cells[1].text.strip(),
+            'date': today
+        }
+
+        for i in range(2, len(cells)):
+            stat_name = headers[i].replace(" ", "_").replace("%", "").replace("-", "_")
+            try:
+                team_data[stat_name] = float(cells[i].text.strip().replace("%", "").replace(",", ""))
+            except:
+                team_data[stat_name] = None
+
+        expected_columns = ["ERA", "H", "BB", "K", "SV", "WHIP"]
+        for col in expected_columns:
+            if col not in team_data:
+                team_data[col] = None
+
+        columns = ", ".join(team_data.keys())
+        placeholders = ", ".join(["?" for _ in team_data])
+        values = list(team_data.values())
+
+        cursor.execute(f"""
+            INSERT INTO team_pitching_stats ({columns})
+            VALUES ({placeholders})
+        """, values)
+
+    conn.commit()
+    print(f"[INFO] Team pitching stats (wide format) scraped and stored for {today}")
+
+# --------------------------------------------------
+# STEP 4: Run Scrapers and Preview in Pandas
+# --------------------------------------------------
 scrape_team_batting_stats()
+scrape_team_pitching_stats()
 
-# You can run this script daily to collect updated stats.
-# Next steps will involve:
-# - Scraping team pitching and individual stats
-# - Scraping game results by date
-# - Feature engineering and model training
-# - Prediction generation and Streamlit front-end integration
+# Load and display a preview using pandas
+print("\n[INFO] Batting Stats Sample:")
+batting_df = pd.read_sql_query("SELECT * FROM team_batting_stats ORDER BY date DESC LIMIT 5", conn)
+print(batting_df)
+
+print("\n[INFO] Pitching Stats Sample:")
+pitching_df = pd.read_sql_query("SELECT * FROM team_pitching_stats ORDER BY date DESC LIMIT 5", conn)
+print(pitching_df)
+
+# Note: This output is for developer inspection.
+# The next step is to automate daily runs and integrate predictions and front-end.
