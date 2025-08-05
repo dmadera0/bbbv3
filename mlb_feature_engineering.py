@@ -9,111 +9,71 @@ The models are trained using only 2025 season data (team stats and game outcomes
 import sqlite3
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import accuracy_score, mean_squared_error
 
-def create_training_data(db_path="mlb_predictions.db"):
-    """
-    Create training feature matrix X and target vectors (y_win, y_margin, y_total) from the database.
-    It uses team-level cumulative statistics up to each game (prior to that game) as features.
-    
-    Returns:
-        X (pd.DataFrame): Feature matrix.
-        y_win (pd.Series): Binary target for home team win (1 if home team wins, 0 if away wins).
-        y_margin (pd.Series): Target for score margin (home_score - away_score).
-        y_total (pd.Series): Target for total runs scored (home_score + away_score).
-    """
+
+def load_data(db_path="mlb_predictions.db"):
     conn = sqlite3.connect(db_path)
-    # Load all games that have been played (home_score not NULL) in chronological order
-    games_df = pd.read_sql("SELECT * FROM games WHERE home_score IS NOT NULL ORDER BY date", conn)
+    stats = pd.read_sql_query("SELECT * FROM team_stats", conn)
+    games = pd.read_sql_query("SELECT * FROM games", conn)
     conn.close()
-    X_features = []
-    y_win = []
-    y_margin = []
-    y_total = []
-    # Initialize cumulative stats for each team (games played, wins, losses, runs scored, runs allowed)
-    cumulative_stats = {}
-    team_ids = set(games_df['home_team_id']) | set(games_df['away_team_id'])
-    for tid in team_ids:
-        cumulative_stats[tid] = [0, 0, 0, 0, 0]  # [games, wins, losses, runs_scored, runs_allowed]
-    # Iterate through each game in order to build features without using future data
-    for _, game in games_df.iterrows():
-        home_id = game['home_team_id']
-        away_id = game['away_team_id']
-        home_score = game['home_score']
-        away_score = game['away_score']
-        # Current cumulative stats for each team before this game
-        games_home, wins_home, losses_home, runs_home, allowed_home = cumulative_stats[home_id]
-        games_away, wins_away, losses_away, runs_away, allowed_away = cumulative_stats[away_id]
-        # Compute features: win percentage and average runs scored/allowed prior to the game
-        home_win_pct = wins_home / games_home if games_home > 0 else 0.0
-        away_win_pct = wins_away / games_away if games_away > 0 else 0.0
-        home_runs_per_game = runs_home / games_home if games_home > 0 else 0.0
-        away_runs_per_game = runs_away / games_away if games_away > 0 else 0.0
-        home_runs_allowed_per_game = allowed_home / games_home if games_home > 0 else 0.0
-        away_runs_allowed_per_game = allowed_away / games_away if games_away > 0 else 0.0
-        # Home field indicator (1 for home team)
-        home_field = 1.0
-        # Feature vector for this game
-        features = [
-            home_win_pct,
-            away_win_pct,
-            home_runs_per_game,
-            away_runs_per_game,
-            home_runs_allowed_per_game,
-            away_runs_allowed_per_game,
-            home_field
-        ]
-        X_features.append(features)
-        # Targets for this game
-        home_win = 1 if home_score > away_score else 0
-        margin = home_score - away_score
-        total_runs = home_score + away_score
-        y_win.append(home_win)
-        y_margin.append(margin)
-        y_total.append(total_runs)
-        # Update cumulative stats after this game
-        cumulative_stats[home_id][0] += 1  # games played for home
-        cumulative_stats[away_id][0] += 1  # games played for away
-        if home_score > away_score:
-            cumulative_stats[home_id][1] += 1  # home wins
-            cumulative_stats[away_id][2] += 1  # away losses
-        else:
-            cumulative_stats[away_id][1] += 1  # away wins
-            cumulative_stats[home_id][2] += 1  # home losses
-        # Update runs scored and allowed
-        cumulative_stats[home_id][3] += home_score
-        cumulative_stats[home_id][4] += away_score
-        cumulative_stats[away_id][3] += away_score
-        cumulative_stats[away_id][4] += home_score
-    # Convert feature list and targets to DataFrame/Series
-    X = pd.DataFrame(X_features, columns=[
-        "home_win_pct", "away_win_pct",
-        "home_runs_per_game", "away_runs_per_game",
-        "home_runs_allowed_per_game", "away_runs_allowed_per_game",
-        "home_field"
-    ])
-    y_win = pd.Series(y_win, name="home_win")
-    y_margin = pd.Series(y_margin, name="run_margin")
-    y_total = pd.Series(y_total, name="total_runs")
-    return X, y_win, y_margin, y_total
 
-def train_models(db_path="mlb_predictions.db"):
-    """
-    Train machine learning models for game outcome prediction using 2025 data.
-    
-    Returns:
-        clf (RandomForestClassifier): Model predicting whether the home team wins.
-        margin_model (RandomForestRegressor): Model predicting the run margin (home - away).
-        total_model (RandomForestRegressor): Model predicting total runs scored.
-    """
-    # Prepare training data
-    X, y_win, y_margin, y_total = create_training_data(db_path)
-    # Initialize models
-    clf = RandomForestClassifier(n_estimators=100, random_state=42)
-    margin_model = RandomForestRegressor(n_estimators=100, random_state=42)
-    total_model = RandomForestRegressor(n_estimators=100, random_state=42)
-    # Train models on the entire 2025 dataset
-    clf.fit(X, y_win)
-    margin_model.fit(X, y_margin)
-    total_model.fit(X, y_total)
-    return clf, margin_model, total_model
+    # Pivot stats into home and away
+    home = stats[stats.is_home == 1].copy()
+    away = stats[stats.is_home == 0].copy()
+
+    home = home.set_index("game_id").add_prefix("home_")
+    away = away.set_index("game_id").add_prefix("away_")
+
+    X = home.join(away, lsuffix="_home", rsuffix="_away")
+    X = X.drop(columns=["home_team_name", "away_team_name"], errors="ignore")
+
+    # Drop rows with any missing values
+    y = games.set_index("game_id")[["home_score", "away_score"]].dropna()
+    common = X.index.intersection(y.index)
+    X = X.loc[common]
+    y = y.loc[common]
+
+    X = X.select_dtypes(include=[np.number])  # keep numeric only
+
+    return X, y
+
+
+def train_models(X, y):
+    # Targets
+    y_win = (y.home_score > y.away_score).astype(int)
+    y_margin = (y.home_score - y.away_score)
+    y_total = (y.home_score + y.away_score)
+
+    # Impute missing features
+    all_nan = [c for c in X.columns if X[c].isna().all()]
+    if all_nan:
+        print(f"[INFO] Dropping all-NaN columns: {all_nan}")
+        X = X.drop(columns=all_nan)
+    imputer = SimpleImputer(strategy="mean")
+    X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
+    print(f"[INFO] After imputation, any NaNs left? {X.isna().any().any()}")
+
+    X_train, X_test, y_win_train, y_win_test = train_test_split(X, y_win, test_size=0.2, random_state=42)
+    _, _, y_margin_train, y_margin_test = train_test_split(X, y_margin, test_size=0.2, random_state=42)
+    _, _, y_total_train, y_total_test = train_test_split(X, y_total, test_size=0.2, random_state=42)
+
+    clf = GradientBoostingClassifier().fit(X_train, y_win_train)
+    reg_margin = GradientBoostingRegressor().fit(X_train, y_margin_train)
+    reg_total = GradientBoostingRegressor().fit(X_train, y_total_train)
+
+    acc = clf.score(X_test, y_win_test)
+    rmse_margin = np.sqrt(mean_squared_error(y_margin_test, reg_margin.predict(X_test)))
+    rmse_total = np.sqrt(mean_squared_error(y_total_test, reg_total.predict(X_test)))
+
+    print(f"[INFO] Trained on {len(X_train)} games; Accuracy={acc:.3f}, Margin RMSE={rmse_margin:.3f}, Total RMSE={rmse_total:.3f}")
+
+    return clf, reg_margin, reg_total
+
+
+if __name__ == "__main__":
+    X, y = load_data()
+    train_models(X, y)
