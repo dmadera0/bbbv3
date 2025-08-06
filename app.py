@@ -116,6 +116,7 @@ with tab2:
                 predicted = home if win == 1 else away
                 confidence_val = round(100 * max(win_proba, 1 - win_proba), 1)
                 predictions.append({
+                    "game_id": g_id,
                     "date": date,
                     "away_team": away,
                     "home_team": home,
@@ -158,6 +159,30 @@ with tab2:
             filtered.reset_index(drop=True).style.apply(highlight_confidence, axis=1)
         )
 
+        # --- SAVE PREDICTIONS BUTTON ---
+        if st.button("💾 Save Predictions For This Date"):
+            saved, skipped = 0, 0
+            for _, row in filtered.iterrows():
+                # Check for existing prediction for this game/date
+                exists = conn.execute(
+                    "SELECT 1 FROM predictions WHERE game_id = ? AND date = ?", (row['game_id'], row['date'])
+                ).fetchone()
+                if exists:
+                    skipped += 1
+                    continue
+                conn.execute("""
+    INSERT INTO predictions (game_id, date, predicted_winner, predicted_margin, predicted_total)
+    VALUES (?, ?, ?, ?, ?)
+""", (
+    row['game_id'], row['date'], row['predicted_winner'],
+    float(row['predicted_margin']), float(row['predicted_total'])
+))
+
+
+                saved += 1
+            conn.commit()
+            st.success(f"Saved {saved} predictions. Skipped {skipped} already saved.")
+
 # --- TAB 3: HISTORICAL ---
 with tab3:
     st.subheader("Historical Predictions")
@@ -179,10 +204,26 @@ with tab3:
         if df.empty:
             st.warning("No predictions found.")
         else:
-            df['actual_winner'] = np.where(df.home_score > df.away_score, df.home_team, df.away_team)
+            df['actual_winner'] = np.where(
+                (df['home_score'] > df['away_score']) & df['home_score'].notnull() & df['away_score'].notnull(),
+                df['home_team'],
+                np.where(
+                    (df['home_score'] < df['away_score']) & df['home_score'].notnull() & df['away_score'].notnull(),
+                    df['away_team'],
+                    ""
+                )
+            )
             df['correct'] = df['predicted_winner'] == df['actual_winner']
             df['correct'] = df['correct'].apply(lambda x: "✅" if x else "❌")
-            df['actual_score'] = df.away_score.astype(int).astype(str) + " - " + df.home_score.astype(int).astype(str)
+
+            # --- NEW SAFER CODE BELOW ---
+            def safe_score(row):
+                if pd.notnull(row['away_score']) and pd.notnull(row['home_score']):
+                    return f"{int(row['away_score'])} - {int(row['home_score'])}"
+                return ""
+            df['actual_score'] = df.apply(safe_score, axis=1)
+            # --- END NEW CODE ---
+
             df_final = df[['away_team', 'home_team', 'predicted_winner', 'actual_score',
                            'predicted_margin', 'predicted_total', 'actual_winner', 'correct']]
             st.dataframe(df_final.reset_index(drop=True))
@@ -207,4 +248,3 @@ with tab4:
         df_sched = df_sched[(df_sched['away_team'] == team_filter) | (df_sched['home_team'] == team_filter)]
 
     st.dataframe(df_sched.reset_index(drop=True))
-
