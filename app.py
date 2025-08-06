@@ -84,7 +84,6 @@ with tab2:
             stats_df = pd.read_sql("SELECT * FROM team_stats", conn)
             stats_map = stats_df.set_index("name").to_dict("index")
 
-
             predictions = []
             for _, game in upcoming_df.iterrows():
                 home = game.home_team
@@ -109,22 +108,27 @@ with tab2:
                     1.0
                 ]
 
+                win_proba = clf.predict_proba([features])[0][1]  # probability home team wins
                 win = clf.predict([features])[0]
                 margin = margin_model.predict([features])[0]
                 total = total_model.predict([features])[0]
 
                 predicted = home if win == 1 else away
+                confidence_val = round(100 * max(win_proba, 1 - win_proba), 1)
                 predictions.append({
                     "date": date,
                     "away_team": away,
                     "home_team": home,
                     "predicted_winner": predicted,
+                    "confidence": confidence_val,
                     "predicted_margin": round(float(margin), 1),
                     "predicted_total": round(float(total), 1)
                 })
 
             if predictions:
-                st.session_state.predictions_all = pd.DataFrame(predictions)
+                df_preds = pd.DataFrame(predictions)
+                df_preds.sort_values(by="confidence", ascending=False, inplace=True)
+                st.session_state.predictions_all = df_preds
             else:
                 st.warning("No games to predict.")
 
@@ -133,7 +137,26 @@ with tab2:
         date_list = sorted(st.session_state.predictions_all['date'].unique())
         selected_date = st.selectbox("Select date", date_list)
         filtered = st.session_state.predictions_all[st.session_state.predictions_all['date'] == selected_date]
-        st.dataframe(filtered.reset_index(drop=True))
+
+        def highlight_confidence(row):
+            conf = row['confidence']
+            if conf >= 75:
+                color = "#d4edda"  # green
+            elif conf <= 60:
+                color = "#f8d7da"  # red
+            else:
+                color = ""
+            return [f"background-color: {color}" for _ in row]
+
+        st.markdown("""
+            **Legend:**
+            <span style='background-color:#d4edda;padding:4px'>High Confidence (≥ 75%)</span> &nbsp;
+            <span style='background-color:#f8d7da;padding:4px'>Low Confidence (≤ 60%)</span>
+        """, unsafe_allow_html=True)
+
+        st.dataframe(
+            filtered.reset_index(drop=True).style.apply(highlight_confidence, axis=1)
+        )
 
 # --- TAB 3: HISTORICAL ---
 with tab3:
@@ -184,3 +207,4 @@ with tab4:
         df_sched = df_sched[(df_sched['away_team'] == team_filter) | (df_sched['home_team'] == team_filter)]
 
     st.dataframe(df_sched.reset_index(drop=True))
+
