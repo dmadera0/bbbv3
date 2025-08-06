@@ -8,107 +8,89 @@ The models are trained using only 2025 season data (team stats and game outcomes
 """
 # mlb_feature_engineering.py
 # ---------------------------
-# Loads features from database, trains models, predicts outcomes
+# Loads team stats + game results from database, trains models, predicts outcomes
 
 import sqlite3
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
-from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, mean_squared_error
+from sklearn.impute import SimpleImputer
+import joblib
+
 
 def load_data(db_path="mlb_predictions.db"):
-    """
-    Loads team_stats and games from SQLite, pivots into feature matrix X and outcome y.
-    Ensures X and y have aligned indices by reindexing X to y's index.
-    Returns:
-      X: DataFrame of numeric features, indexed by game_id
-      y: DataFrame with home_score and away_score indexed by game_id
-    """
     conn = sqlite3.connect(db_path)
-    stats = pd.read_sql_query("SELECT * FROM team_stats", conn)
-    games = pd.read_sql_query("SELECT * FROM games", conn)
+    games = pd.read_sql("SELECT * FROM games WHERE home_score IS NOT NULL AND away_score IS NOT NULL", conn)
+    team_stats = pd.read_sql("SELECT * FROM team_stats", conn)
     conn.close()
 
-    # Pivot stats into home and away features per game
-    home = stats[stats.is_home == 1].copy()
-    away = stats[stats.is_home == 0].copy()
+    # Build feature rows for each game using team-level stats
+    rows = []
+    for _, row in games.iterrows():
+        home = team_stats[team_stats.name == row.home_team]
+        away = team_stats[team_stats.name == row.away_team]
+        if home.empty or away.empty:
+            continue
 
-    home = home.set_index("game_id").add_prefix("home_")
-    away = away.set_index("game_id").add_prefix("away_")
+        home = home.iloc[0]
+        away = away.iloc[0]
+        home_games = home.wins + home.losses
+        away_games = away.wins + away.losses
 
-    # Combine home & away into feature matrix X
-    X = home.join(away, how="inner")
+        features = {
+            "home_win_pct": home.wins / home_games if home_games > 0 else 0.0,
+            "away_win_pct": away.wins / away_games if away_games > 0 else 0.0,
+            "home_runs_scored_pg": home.runs_scored / home_games if home_games > 0 else 0.0,
+            "away_runs_scored_pg": away.runs_scored / away_games if away_games > 0 else 0.0,
+            "home_runs_allowed_pg": home.runs_allowed / home_games if home_games > 0 else 0.0,
+            "away_runs_allowed_pg": away.runs_allowed / away_games if away_games > 0 else 0.0,
+            "home_field": 1.0
+        }
+        label = {
+            "home_score": row.home_score,
+            "away_score": row.away_score
+        }
 
-    # Remove potential duplicate game_id rows
-    X = X[~X.index.duplicated(keep='first')]
+        rows.append((features, label))
 
-    # Drop identifier columns if present
-    for col in ["home_team_name", "away_team_name"]:
-        X.drop(columns=[col], errors="ignore", inplace=True)
-
-    # Load outcomes and keep only games with recorded scores
-    y = games.set_index("game_id")[['home_score','away_score']].dropna()
-
-    # Align features to the outcomes index
-    X = X.reindex(index=y.index)
-
-    # Keep only numeric feature columns
-    X = X.select_dtypes(include=[np.number])
-
-    # Debug lengths after alignment
-    print(f"[DEBUG] load_data after align: X.len={len(X)}, y.len={len(y)}")
+    # Convert to DataFrame
+    X = pd.DataFrame([f for f, _ in rows])
+    y = pd.DataFrame([l for _, l in rows])
 
     return X, y
 
 
 def train_models(X, y):
-    """
-    Train models for:
-     - Home win classification
-     - Score margin regression
-     - Total runs regression
-    Returns trained (clf, reg_margin, reg_total).
-    """
-    # Targets
     y_win = (y.home_score > y.away_score).astype(int)
-    y_margin = (y.home_score - y.away_score)
-    y_total = (y.home_score + y.away_score)
+    y_margin = y.home_score - y.away_score
+    y_total = y.home_score + y.away_score
 
-    # Debug target lengths
-    print(f"[DEBUG] train_models: y_win.len={len(y_win)}, y_margin.len={len(y_margin)}, y_total.len={len(y_total)}")
-
-    # Impute missing feature values if any
-    all_nan = [c for c in X.columns if X[c].isna().all()]
-    if all_nan:
-        print(f"[INFO] Dropping all-NaN columns: {all_nan}")
-        X = X.drop(columns=all_nan)
     imputer = SimpleImputer(strategy="mean")
-    X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns, index=X.index)
-    print(f"[INFO] After imputation, any NaNs left? {X.isna().any().any()}")
+    X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
 
-    # Unified split of features and three targets
-    (X_train, X_test,
-     y_win_train, y_win_test,
-     y_margin_train, y_margin_test,
-     y_total_train, y_total_test) = train_test_split(
-        X, y_win, y_margin, y_total, test_size=0.2, random_state=42
-    )
+    X_train, X_test, y_win_train, y_win_test = train_test_split(X, y_win, test_size=0.2, random_state=42)
+    _, _, y_margin_train, y_margin_test = train_test_split(X, y_margin, test_size=0.2, random_state=42)
+    _, _, y_total_train, y_total_test = train_test_split(X, y_total, test_size=0.2, random_state=42)
 
-    # Train models
     clf = GradientBoostingClassifier().fit(X_train, y_win_train)
     reg_margin = GradientBoostingRegressor().fit(X_train, y_margin_train)
     reg_total = GradientBoostingRegressor().fit(X_train, y_total_train)
 
-    # Evaluate
-    acc = clf.score(X_test, y_win_test)
+    acc = accuracy_score(y_win_test, clf.predict(X_test))
     rmse_margin = np.sqrt(mean_squared_error(y_margin_test, reg_margin.predict(X_test)))
     rmse_total = np.sqrt(mean_squared_error(y_total_test, reg_total.predict(X_test)))
-    print(f"[INFO] Trained on {len(X_train)} games; Accuracy={acc:.3f}, "
-          f"Margin RMSE={rmse_margin:.3f}, Total RMSE={rmse_total:.3f}")
+
+    print(f"[INFO] Accuracy={acc:.3f}, Margin RMSE={rmse_margin:.3f}, Total RMSE={rmse_total:.3f}")
+
+    joblib.dump(clf, "model_winner.pkl")
+    joblib.dump(reg_margin, "model_margin.pkl")
+    joblib.dump(reg_total, "model_total.pkl")
+    print("[INFO] Models saved.")
 
     return clf, reg_margin, reg_total
+
 
 if __name__ == "__main__":
     X, y = load_data()

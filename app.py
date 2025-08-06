@@ -6,6 +6,14 @@ This app allows users to:
 - Browse historical predictions by selecting a past date.
 - View the full 2025 season schedule including future games.
 """
+# app.py - Streamlit UI for MLB 2025 Predictions
+# ----------------------------------------------
+# Allows:
+# - Viewing predictions for today
+# - Predicting and viewing all future games
+# - Reviewing historical predictions
+# - Full 2025 schedule browsing
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -25,19 +33,17 @@ except Exception:
 # Connect to DB
 conn = sqlite3.connect("mlb_predictions.db", check_same_thread=False)
 
-# Load all known team names
+# Load team names
 team_names = pd.read_sql("""
-    SELECT DISTINCT name FROM team_stats
-    UNION
     SELECT DISTINCT home_team AS name FROM games
     UNION
     SELECT DISTINCT away_team AS name FROM games
 """, conn)
-team_list = sorted(team_names['name'].unique())
-team_name_map = {idx: name for idx, name in enumerate(team_list, start=1)}
+teams_list = sorted(team_names['name'].tolist())
 
-st.title("⚾ MLB 2025 Game Prediction Dashboard")
+st.title("MLB 2025 Game Prediction Dashboard")
 
+# Tabs
 tab1, tab2, tab3, tab4 = st.tabs([
     "Today's Predictions", "Upcoming Games",
     "Historical Predictions", "Full Schedule"
@@ -48,9 +54,11 @@ with tab1:
     st.subheader("Today's Predictions")
     today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
     query_today = """
-        SELECT away_team, home_team, predicted_winner, predicted_margin, predicted_total
-        FROM predictions
-        WHERE date = ?
+        SELECT g.away_team, g.home_team, p.predicted_winner,
+               p.predicted_margin, p.predicted_total
+        FROM predictions p
+        JOIN games g ON p.game_id = g.game_id
+        WHERE p.date = ?
     """
     df_today = pd.read_sql(query_today, conn, params=[today_str])
     if df_today.empty:
@@ -61,14 +69,14 @@ with tab1:
 # --- TAB 2: UPCOMING ---
 with tab2:
     st.subheader("Predict Upcoming Games")
-
     if "predictions_all" not in st.session_state:
         st.session_state.predictions_all = None
 
     if st.session_state.predictions_all is None:
-        if st.button("📊 Predict All Remaining Games"):
+        if st.button("Predict All Remaining Games"):
             upcoming_df = pd.read_sql("""
-                SELECT date, home_team, away_team FROM games
+                SELECT game_id, date, home_team, away_team
+                FROM games
                 WHERE home_score IS NULL AND away_score IS NULL AND date > ?
                 ORDER BY date
             """, conn, params=[today_str])
@@ -76,18 +84,20 @@ with tab2:
             stats_df = pd.read_sql("SELECT * FROM team_stats", conn)
             stats_map = stats_df.set_index("name").to_dict("index")
 
+
             predictions = []
             for _, game in upcoming_df.iterrows():
                 home = game.home_team
                 away = game.away_team
                 date = game.date
+                g_id = game.game_id
                 if home not in stats_map or away not in stats_map:
                     continue
 
                 s_home = stats_map[home]
                 s_away = stats_map[away]
 
-                def safe_div(n, d): return n / d if d > 0 else 0.0
+                def safe_div(n, d): return n / d if d else 0.0
 
                 features = [
                     safe_div(s_home['wins'], s_home['wins'] + s_home['losses']),
@@ -96,16 +106,19 @@ with tab2:
                     safe_div(s_away['runs_scored'], s_away['wins'] + s_away['losses']),
                     safe_div(s_home['runs_allowed'], s_home['wins'] + s_home['losses']),
                     safe_div(s_away['runs_allowed'], s_away['wins'] + s_away['losses']),
-                    1.0  # home field advantage
+                    1.0
                 ]
+
                 win = clf.predict([features])[0]
                 margin = margin_model.predict([features])[0]
                 total = total_model.predict([features])[0]
+
+                predicted = home if win == 1 else away
                 predictions.append({
                     "date": date,
                     "away_team": away,
                     "home_team": home,
-                    "predicted_winner": home if win == 1 else away,
+                    "predicted_winner": predicted,
                     "predicted_margin": round(float(margin), 1),
                     "predicted_total": round(float(total), 1)
                 })
@@ -133,11 +146,11 @@ with tab3:
         default_idx = len(dates) - 1
         date_chosen = st.selectbox("Select date", dates, index=default_idx)
         df = pd.read_sql("""
-            SELECT away_team, home_team, predicted_winner, predicted_margin, predicted_total,
-                   away_score, home_score
-            FROM predictions
-            JOIN games USING (game_id)
-            WHERE date = ?
+            SELECT g.away_team, g.home_team, p.predicted_winner, p.predicted_margin,
+                   p.predicted_total, g.away_score, g.home_score
+            FROM predictions p
+            JOIN games g ON p.game_id = g.game_id
+            WHERE p.date = ?
         """, conn, params=[date_chosen])
 
         if df.empty:
@@ -166,7 +179,7 @@ with tab4:
     )
     df_sched.drop(columns=['away_score', 'home_score'], inplace=True)
 
-    team_filter = st.selectbox("Filter by team", ["All Teams"] + team_list)
+    team_filter = st.selectbox("Filter by team", ["All Teams"] + teams_list)
     if team_filter != "All Teams":
         df_sched = df_sched[(df_sched['away_team'] == team_filter) | (df_sched['home_team'] == team_filter)]
 
