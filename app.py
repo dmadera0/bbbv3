@@ -20,6 +20,25 @@ except Exception:
 # Connect to DB
 conn = sqlite3.connect("mlb_predictions.db", check_same_thread=False)
 
+# Backend function: get resulted games (completed + predicted)
+def get_resulted_games():
+    query = """
+        SELECT
+            g.game_id,
+            g.date,
+            g.away_team,
+            g.home_team,
+            g.away_score,
+            g.home_score,
+            p.predicted_winner,
+            p.predicted_margin,
+            p.predicted_total
+        FROM games g
+        JOIN predictions p ON g.game_id = p.game_id
+        WHERE g.away_score IS NOT NULL AND g.home_score IS NOT NULL
+    """
+    return pd.read_sql(query, conn)
+
 # Load team names
 team_names = pd.read_sql("""
     SELECT DISTINCT home_team AS name FROM games
@@ -29,6 +48,7 @@ team_names = pd.read_sql("""
 teams_list = sorted(team_names['name'].tolist())
 
 st.title("MLB 2025 Game Prediction Dashboard")
+st.set_page_config(layout="wide")
 
 # Tabs
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -237,14 +257,14 @@ with tab4:
 with tab5:
     st.subheader("All Stored Predictions")
     df_all_preds = pd.read_sql("""
-        SELECT g.date, g.away_team, g.home_team, 
-               p.predicted_winner, p.predicted_margin, p.predicted_total
+        SELECT p.date, p.predicted_winner, p.predicted_margin, p.predicted_total,
+               g.away_team, g.home_team
         FROM predictions p
-        JOIN games g ON p.game_id = g.game_id
-        ORDER BY g.date DESC
+        LEFT JOIN games g ON p.game_id = g.game_id
+        ORDER BY p.date DESC
     """, conn)
 
     if df_all_preds.empty:
         st.info("No stored predictions found.")
     else:
-        st.dataframe(df_all_preds.reset_index(drop=True))
+        st.dataframe(df_all_preds.sort_values(by=["date", "home_team", "away_team"]).reset_index(drop=True))
