@@ -1,27 +1,11 @@
-"""
-Streamlit web application for MLB Game Predictions.
-This app allows users to:
-- View today's game predictions.
-- Generate predictions for all upcoming (future) games.
-- Browse historical predictions by selecting a past date.
-- View the full 2025 season schedule including future games.
-"""
-# app.py - Streamlit UI for MLB 2025 Predictions
-# ----------------------------------------------
-# Allows:
-# - Viewing predictions for today
-# - Predicting and viewing all future games
-# - Reviewing historical predictions
-# - Full 2025 schedule browsing
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import sqlite3
 import joblib
+
 with open("style.css") as f:
     st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
-
 
 # Load models (or train if missing)
 try:
@@ -47,9 +31,10 @@ teams_list = sorted(team_names['name'].tolist())
 st.title("MLB 2025 Game Prediction Dashboard")
 
 # Tabs
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Today's Predictions", "Upcoming Games",
-    "Historical Predictions", "Full Schedule"
+    "Historical Predictions", "Full Schedule",
+    "All Stored Predictions"
 ])
 
 # --- TAB 1: TODAY ---
@@ -166,22 +151,20 @@ with tab2:
         if st.button("💾 Save Predictions For This Date"):
             saved, skipped = 0, 0
             for _, row in filtered.iterrows():
-                # Check for existing prediction for this game/date
                 exists = conn.execute(
-                    "SELECT 1 FROM predictions WHERE game_id = ? AND date = ?", (row['game_id'], row['date'])
+                    "SELECT 1 FROM predictions WHERE game_id = ? AND date = ?",
+                    (row['game_id'], row['date'])
                 ).fetchone()
                 if exists:
                     skipped += 1
                     continue
                 conn.execute("""
-    INSERT INTO predictions (game_id, date, predicted_winner, predicted_margin, predicted_total)
-    VALUES (?, ?, ?, ?, ?)
-""", (
-    row['game_id'], row['date'], row['predicted_winner'],
-    float(row['predicted_margin']), float(row['predicted_total'])
-))
-
-
+                    INSERT INTO predictions (game_id, date, predicted_winner, predicted_margin, predicted_total)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    row['game_id'], row['date'], row['predicted_winner'],
+                    float(row['predicted_margin']), float(row['predicted_total'])
+                ))
                 saved += 1
             conn.commit()
             st.success(f"Saved {saved} predictions. Skipped {skipped} already saved.")
@@ -202,33 +185,31 @@ with tab3:
             FROM predictions p
             JOIN games g ON p.game_id = g.game_id
             WHERE p.date = ?
+              AND g.away_score IS NOT NULL AND g.home_score IS NOT NULL
         """, conn, params=[date_chosen])
 
         if df.empty:
-            st.warning("No predictions found.")
+            st.warning("No predictions found or no completed games for this date.")
         else:
             df['actual_winner'] = np.where(
-                (df['home_score'] > df['away_score']) & df['home_score'].notnull() & df['away_score'].notnull(),
-                df['home_team'],
-                np.where(
-                    (df['home_score'] < df['away_score']) & df['home_score'].notnull() & df['away_score'].notnull(),
-                    df['away_team'],
-                    ""
-                )
+                df.home_score > df.away_score, df.home_team,
+                np.where(df.away_score > df.home_score, df.away_team, "")
             )
             df['correct'] = df['predicted_winner'] == df['actual_winner']
             df['correct'] = df['correct'].apply(lambda x: "✅" if x else "❌")
 
-            # --- NEW SAFER CODE BELOW ---
             def safe_score(row):
                 if pd.notnull(row['away_score']) and pd.notnull(row['home_score']):
                     return f"{int(row['away_score'])} - {int(row['home_score'])}"
                 return ""
+
             df['actual_score'] = df.apply(safe_score, axis=1)
-            # --- END NEW CODE ---
 
             df_final = df[['away_team', 'home_team', 'predicted_winner', 'actual_score',
                            'predicted_margin', 'predicted_total', 'actual_winner', 'correct']]
+
+            accuracy = (df['correct'] == "✅").mean()
+            st.markdown(f"**Prediction Accuracy:** {accuracy:.0%} ✅")
             st.dataframe(df_final.reset_index(drop=True))
 
 # --- TAB 4: FULL SCHEDULE ---
@@ -251,3 +232,19 @@ with tab4:
         df_sched = df_sched[(df_sched['away_team'] == team_filter) | (df_sched['home_team'] == team_filter)]
 
     st.dataframe(df_sched.reset_index(drop=True))
+
+# --- TAB 5: ALL STORED PREDICTIONS ---
+with tab5:
+    st.subheader("All Stored Predictions")
+    df_all_preds = pd.read_sql("""
+        SELECT g.date, g.away_team, g.home_team, 
+               p.predicted_winner, p.predicted_margin, p.predicted_total
+        FROM predictions p
+        JOIN games g ON p.game_id = g.game_id
+        ORDER BY g.date DESC
+    """, conn)
+
+    if df_all_preds.empty:
+        st.info("No stored predictions found.")
+    else:
+        st.dataframe(df_all_preds.reset_index(drop=True))
