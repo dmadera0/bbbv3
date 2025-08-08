@@ -74,3 +74,13 @@ h1, .stTitle {
 [data-baseweb="tab"] {
     flex-shrink: 0 !important;
 }
+/* Center content */
+.stApp > .main {
+    display: flex;
+    justify-content: center;
+}
+
+.block-container {
+    max-width: 1200px;
+    margin: auto;
+}
